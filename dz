@@ -1,0 +1,211 @@
+import argparse
+
+import torch
+from torch import nn
+from torchvision import transforms
+
+from training_common import (
+    fit,
+    get_device,
+    make_loaders,
+    set_seed,
+)
+
+
+def conv_block(in_channels, out_channels):
+    return nn.Sequential(
+        nn.Conv2d(
+            in_channels,
+            out_channels,
+            kernel_size=3,
+            padding=1,
+            bias=False,
+        ),
+        nn.BatchNorm2d(out_channels),
+        nn.ReLU(inplace=True),
+    )
+
+
+class SimpleCNN(nn.Module):
+    def __init__(self, num_classes=10):
+        super().__init__()
+
+        self.features = nn.Sequential(
+            conv_block(3, 32),
+            nn.MaxPool2d(2),
+
+            conv_block(32, 64),
+            nn.MaxPool2d(2),
+
+            conv_block(64, 128),
+            nn.AdaptiveAvgPool2d((1, 1)),
+        )
+
+        self.classifier = nn.Linear(
+            128,
+            num_classes,
+        )
+
+    def forward(self, images):
+        features = self.features(images)
+        features = torch.flatten(features, 1)
+
+        return self.classifier(features)
+
+
+class ResidualBlock(nn.Module):
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        stride=1,
+    ):
+        super().__init__()
+
+        self.main = nn.Sequential(
+            nn.Conv2d(
+                in_channels,
+                out_channels,
+                kernel_size=3,
+                stride=stride,
+                padding=1,
+                bias=False,
+            ),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+
+            nn.Conv2d(
+                out_channels,
+                out_channels,
+                kernel_size=3,
+                padding=1,
+                bias=False,
+            ),
+            nn.BatchNorm2d(out_channels),
+        )
+
+        if stride != 1 or in_channels != out_channels:
+            self.skip = nn.Sequential(
+                nn.Conv2d(
+                    in_channels,
+                    out_channels,
+                    kernel_size=1,
+                    stride=stride,
+                    bias=False,
+                ),
+                nn.BatchNorm2d(out_channels),
+            )
+        else:
+            self.skip = nn.Identity()
+
+        self.activation = nn.ReLU(inplace=True)
+
+    def forward(self, x):
+        return self.activation(
+            self.main(x) + self.skip(x)
+        )
+
+
+class SmallResidualCNN(nn.Module):
+    def __init__(self, num_classes=10):
+        super().__init__()
+
+        self.features = nn.Sequential(
+            conv_block(3, 32),
+
+            ResidualBlock(32, 32),
+            ResidualBlock(32, 64, stride=2),
+            ResidualBlock(64, 64),
+
+            ResidualBlock(64, 128, stride=2),
+            ResidualBlock(128, 128),
+
+            nn.AdaptiveAvgPool2d((1, 1)),
+        )
+
+        self.classifier = nn.Linear(
+            128,
+            num_classes,
+        )
+
+    def forward(self, images):
+        features = self.features(images)
+        features = torch.flatten(features, 1)
+
+        return self.classifier(features)
+
+
+def main():
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument(
+        "--architecture",
+        choices=["cnn", "residual"],
+        default="cnn",
+    )
+
+    parser.add_argument("--epochs", type=int, default=15)
+    parser.add_argument("--batch-size", type=int, default=128)
+    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--limit", type=int, default=0)
+    parser.add_argument("--data-root", default="./data")
+    parser.add_argument("--output", default="outputs/lesson4")
+
+    args = parser.parse_args()
+    set_seed(42)
+
+    mean = (0.4914, 0.4822, 0.4465)
+    std = (0.2470, 0.2435, 0.2616)
+
+    # Без случайных аугментаций, чтобы сначала
+    # сравнивать именно архитектуры.
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize(mean, std),
+    ])
+
+    train_loader, val_loader, test_loader, classes = (
+        make_loaders(
+            dataset_name="cifar10",
+            root=args.data_root,
+            batch_size=args.batch_size,
+            train_transform=transform,
+            eval_transform=transform,
+            limit=args.limit,
+        )
+    )
+
+    model_classes = {
+        "cnn": SimpleCNN,
+        "residual": SmallResidualCNN,
+    }
+
+    model = model_classes[args.architecture](
+        num_classes=len(classes)
+    )
+
+    metadata = {
+        "architecture": args.architecture,
+        "dataset": "cifar10",
+        "input_shape": [3, 32, 32],
+        "num_classes": len(classes),
+        "classes": classes,
+        "mean": list(mean),
+        "std": list(std),
+    }
+
+    fit(
+        model=model,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        test_loader=test_loader,
+        device=get_device(),
+        epochs=args.epochs,
+        lr=args.lr,
+        output=args.output,
+        metadata=metadata,
+    )
+
+
+if __name__ == "__main__":
+    main()
